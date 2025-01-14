@@ -1,0 +1,446 @@
+
+pub mod vban{
+    use core::panic;
+    use std::{net::{IpAddr, UdpSocket}, usize};
+    use alsa::{pcm::*, ValueOr};
+    use alsa::Direction;
+    use byteorder::{ByteOrder, LittleEndian};
+
+
+    const VBAN_HEADER_SIZE : usize = 4 + 1 + 1 + 1 + 1 + 16;
+    const VBAN_STREAM_NAME_SIZE : usize = 16;
+    const VBAN_PROTOCOL_MAX_SIZE : usize = 1464;
+    const VBAN_DATA_MAX_SIZE : usize = VBAN_PROTOCOL_MAX_SIZE - VBAN_HEADER_SIZE;
+    const VBAN_CHANNELS_MAX_NB : usize = 256;
+    const VBAN_SAMPLES_MAX_NB : usize = 256;
+
+
+    const VBAN_PACKET_NUM_SAMPLES : usize = 256;  
+    const VBAN_PACKET_MAX_SAMPLES : usize = 1024;
+    // const VBAN_PACKET_MAX_SAMPLES : usize = 256;
+    const VBAN_PACKET_HEADER_BYTES : usize = 24;  
+    const VBAN_PACKET_COUNTER_BYTES : usize = 4;  
+    const VBAN_PACKET_MAX_LEN_BYTES : usize = VBAN_PACKET_HEADER_BYTES + VBAN_PACKET_COUNTER_BYTES + VBAN_PACKET_MAX_SAMPLES*2;
+
+
+    struct VBanHeader {
+        preamble : [u8; 4],
+        sample_rate : u8,
+        num_samples : u8,
+
+        // number of channels, where 0 = one channel
+        num_channels : u8,
+        sample_format : u8,
+        stream_name : [u8;16],
+        nu_frame : u32
+    }
+
+    impl From<[u8; 28]> for VBanHeader {
+        fn from (item: [u8; 28]) -> Self {
+
+            // let frame_count : u32 = item[24] as u32 + (item[25] as u32) << 8 + (item[26] as u32) << 16 + (item[27] as u32) << 24;
+            let frame_count  = 0;
+
+            Self {
+                preamble : item[0..4].try_into().unwrap(),
+                sample_rate : item[4],
+                num_samples : item[5],
+                num_channels : item[6],
+                sample_format : item[7],
+                stream_name : [item[8], item[9], item[10], item[11], item[12], item[13], item[14], item[15], item[16], item[17], item[18], item[19], item[20], item[21], item[22], item[23]],
+                nu_frame : frame_count
+            }
+        }
+    }
+
+    // VBan struct missing
+
+    const VBAN_SR_MASK : u8 = 0x1F;
+    const VBAN_SR_MAXNUMBER : u8 = 21;
+    const VBAN_SRLIST : [u32; 21] = [
+        6000, 12000, 24000, 48000, 96000, 192000, 384000,
+        8000, 16000, 32000, 64000, 128000, 256000, 512000,
+        11025, 22050, 44100, 88200, 176400, 352800, 705600
+    ];
+
+    #[derive(Copy, Clone, Debug)]
+    pub enum VBanSampleRates {
+        SampleRate6000Hz,
+        SampleRate12000Hz,
+        SampleRate24000Hz,
+        SampleRate48000Hz,
+        SampleRate96000Hz,
+        SampleRate192000Hz,
+        SampleRate384000Hz,
+        SampleRate8000Hz,
+        SampleRate16000Hz,
+        SampleRate32000Hz,
+        SampleRate64000Hz,
+        SampleRate128000Hz,
+        SampleRate256000Hz,
+        SampleRate512000Hz,
+        SampleRate11025Hz,
+        SampleRate22050Hz,
+        SampleRate44100Hz,
+        SampleRate88200Hz,
+        SampleRate176400Hz,
+        SampleRate352800Hz,
+        SampleRate705600Hz
+    }
+
+    impl From<u8> for VBanSampleRates {
+
+        fn from(item : u8) -> Self{
+            match item {
+                0 => VBanSampleRates::SampleRate6000Hz,
+                1 => VBanSampleRates::SampleRate12000Hz,
+                2 => VBanSampleRates::SampleRate24000Hz,
+                3 => VBanSampleRates::SampleRate48000Hz,
+                4 => VBanSampleRates::SampleRate96000Hz,
+                5 => VBanSampleRates::SampleRate192000Hz,
+                6 => VBanSampleRates::SampleRate384000Hz,
+                7 => VBanSampleRates::SampleRate8000Hz,
+                8 => VBanSampleRates::SampleRate16000Hz,
+                9 => VBanSampleRates::SampleRate32000Hz,
+                10 => VBanSampleRates::SampleRate64000Hz,
+                11 => VBanSampleRates::SampleRate128000Hz,
+                12 => VBanSampleRates::SampleRate256000Hz,
+                13 => VBanSampleRates::SampleRate512000Hz,
+                14 => VBanSampleRates::SampleRate11025Hz,
+                15 => VBanSampleRates::SampleRate22050Hz,
+                16 => VBanSampleRates::SampleRate44100Hz,
+                17 => VBanSampleRates::SampleRate88200Hz,
+                18 => VBanSampleRates::SampleRate176400Hz,
+                19 => VBanSampleRates::SampleRate352800Hz,
+                20 => VBanSampleRates::SampleRate705600Hz,
+                _ => panic!("Invalid value for enum VBanSampleRates ({:b})", item)
+        }
+    }
+}
+
+    const VBAN_PROTOCOL_MASK : u8 = 0xE0;
+
+    enum VBanProtocol {
+        VbanProtocolAudio         =   0x00,
+        VbanProtocolSerial        =   0x20,
+        VbanProtocolTxt           =   0x40,
+        VbanProtocolUndefined1   =   0x80,
+        VbanProtocolUndefined2   =   0xA0,
+        VbanProtocolUndefined3   =   0xC0,
+        VbanProtocolUndefined4   =   0xE0
+    }
+
+    const VBAN_BIT_RESOLUTION_MASK : u32 = 0x07;
+
+    #[derive(Clone, Copy, Debug)]
+    enum VBanBitResolution {
+        VbanBitfmt8Int = 0,
+        VbanBitfmt16Int,
+        VbanBitfmt24Int,
+        VbanBitfmt32Int,
+        VbanBitfmt32Float,
+        VbanBitfmt64Float,
+        VbanBitfmt12Int,
+        VbanBitfmt10Int,
+        VbanBitResolutionMax
+    }
+
+    impl From<u8> for VBanBitResolution {
+        fn from(item : u8) -> Self {
+            match  item  {
+                0 => VBanBitResolution::VbanBitfmt8Int,
+                1 => VBanBitResolution::VbanBitfmt16Int,
+                2 => VBanBitResolution::VbanBitfmt24Int,
+                3 => VBanBitResolution::VbanBitfmt32Int,
+                4 => VBanBitResolution::VbanBitfmt32Float,
+                5 => VBanBitResolution::VbanBitfmt64Float,
+                6 => VBanBitResolution::VbanBitfmt12Int,
+                7 => VBanBitResolution::VbanBitfmt10Int,
+                8 => VBanBitResolution::VbanBitResolutionMax,
+                _ => VBanBitResolution::VbanBitResolutionMax,        // should be invalid tho
+            }
+        }
+    }
+
+    const VBAN_BIT_RESOLUTION_SIZE : [u8; 6] = [ 1, 2, 3, 4, 4, 8, ];
+
+    const VBAN_RESERVED_MASK : u8 = 0x08;
+    const VBAN_CODEC_MASK : u8 = 0xF0;
+
+    enum VBanCodec {
+        VbanCodecPcm              =   0x00,
+        VbanCodecVbca             =   0x10,
+        VbanCodecVbcv             =   0x20,
+        VbanCodecUndefined3      =   0x30,
+        VbanCodecUndefined4      =   0x40,
+        VbanCodecUndefined5      =   0x50,
+        VbanCodecUndefined6      =   0x60,
+        VbanCodecUndefined7      =   0x70,
+        VbanCodecUndefined8      =   0x80,
+        VbanCodecUndefined9      =   0x90,
+        VbanCodecUndefined10     =   0xA0,
+        VbanCodecUndefined11     =   0xB0,
+        VbanCodecUndefined12     =   0xC0,
+        VbanCodecUndefined13     =   0xD0,
+        VbanCodecUndefined14     =   0xE0,
+        VbanCodecUser             =   0xF0
+    }
+
+    #[derive (PartialEq)]
+    enum PlayerState {
+        Idle,
+        Playing,
+    }
+
+    pub struct VbanRecipient {
+
+        socket : UdpSocket,
+
+        sample_rate : Option<VBanSampleRates>,
+
+        num_channels : Option<u8>,
+
+        sample_format : Option<VBanBitResolution>,
+
+        stream_name : [u8;16],
+
+        nu_frame : u32,
+
+        state : PlayerState,
+    }
+
+    impl VbanRecipient {
+
+        pub fn create(ip_addr : IpAddr, port: u16, stream_name : String, numch : Option<u8>, sample_rate : Option<VBanSampleRates>) -> Option<Self> {
+
+            if stream_name.len() > VBAN_STREAM_NAME_SIZE {
+                dbg!("Stream name is too long!");
+                return None;
+            }
+
+            let mut _sn: [u8; 16] = [0;16];
+
+            for (idx, b) in stream_name.bytes().enumerate(){
+                if idx >= VBAN_STREAM_NAME_SIZE {
+                    break;
+                }
+                _sn[idx] = b;
+            }
+            
+            let to_addr = (ip_addr, port);
+            Some (Self {
+                socket :  match UdpSocket::bind(to_addr){
+                    Ok(sock) => sock,
+                    Err(_) => {
+                        dbg!("Could not bind socket");
+                        return None;
+                    },
+                },
+                
+                sample_rate : sample_rate,
+                
+                num_channels : numch,
+                
+                sample_format : None,
+                
+                stream_name : _sn,
+                
+                nu_frame : 0,
+                
+                state : PlayerState::Idle,
+            })
+        }
+        
+
+        pub fn handle(&mut self, sink : &AlsaSink){
+            let mut buf :[u8; VBAN_PACKET_MAX_LEN_BYTES] = [0; VBAN_PACKET_MAX_LEN_BYTES];
+            let packet = self.socket.recv_from(&mut buf);
+            let buf = Vec::from(buf);
+
+            let size = match packet {
+                Ok((size, addr)) => {
+                    // println!("Got message of size {size} from {addr}.");
+                    // println!("data: {buf:?}");
+                    size
+                },
+                _ => 0,
+            };
+
+            if buf[..4] == *b"VBAN" {
+
+                let head : [u8; 28] = buf[0..28].try_into().unwrap();
+                let head = VBanHeader::from(head);
+
+                self.num_channels = Some(head.num_channels + 1);
+                self.sample_rate = Some(head.sample_rate.into());
+                self.sample_format = Some(head.sample_format.into());
+            
+                let num_samples = head.num_samples + 1;
+
+                // println!("Extracted info from the packet:
+// num_channels={}
+// sample_rate={:?}
+// bps={:?}
+// num_samples={}", 
+                //             self.num_channels.unwrap(), self.sample_rate.unwrap(), self.sample_format.unwrap(), num_samples);
+                // println!("Stream name: {:?}", std::str::from_utf8(&self.stream_name).unwrap());
+
+                let audio_data : Vec<u8> = Vec::from(&buf[VBAN_PACKET_HEADER_BYTES + VBAN_PACKET_COUNTER_BYTES..size]);
+                let mut to_sink = vec![0; audio_data.len() / 2];
+
+                let mut left : i16 = 0;
+                let mut right : i16 = 0;
+                for (idx, smp) in audio_data.iter().enumerate() {
+                    if idx % 2 == 1 {
+                        continue;
+                    }
+
+                    let amplitude_le = LittleEndian::read_i16(&audio_data[idx..idx+2]);
+
+                    if idx % 4 == 0 {
+                        if amplitude_le > left {
+                            left = amplitude_le;
+                        }
+                    } else {
+                        if amplitude_le > right {
+                            right = amplitude_le;
+                        }
+                    }
+
+                    to_sink[idx / 2] = amplitude_le;
+                }
+                println!("\x1B[1ALeft {:.4}, Right {:.4} (from {num_samples} samples)", (left as f32 / i16::MAX as f32), (right as f32 / i16::MAX as f32));
+
+                // if self.state == PlayerState::Idle {
+                //     /* Push silence before the data */
+                //     println!("Silence!");
+                //     sink.write(&[0i16; 44100], 44100);
+                //     self.state = PlayerState::Playing;
+                // }
+                sink.write(&to_sink, size/2);
+            } else{
+                println!("Packet is not VBAN");
+            }
+        }
+
+
+        // GETTER
+        fn name(self) -> [u8;16]{
+            self.stream_name
+        }
+
+        fn sample_rate(self) -> u32 {
+            VBAN_SRLIST[self.sample_rate.unwrap() as usize]
+        }
+
+        fn bits_per_sample(self) -> u8 {
+            self.sample_format.unwrap() as u8
+        }
+
+        fn num_channels(self) -> u8 {
+            (self.num_channels.unwrap() + 1) as u8
+        }
+
+
+    }
+
+
+    // ALSA SINK
+
+    pub struct AlsaSink {
+        pcm : PCM,
+    }
+
+    impl AlsaSink {
+
+        pub fn init(device : &str, num_channels : Option<u32>, sample_rate : Option<u32>) -> Option<Self> {
+
+            let sink = Self {
+                pcm : {
+                    PCM::new(device, Direction::Playback, false).expect("Could not create PCM.")
+                },
+            };
+
+            let num_channels = match num_channels {
+                None => {2},
+                Some(ch) => ch,
+            };
+            let rate = match sample_rate {
+                None => 44100,
+                Some(r) => r,
+            };
+
+            {
+                let hwp = HwParams::any(&sink.pcm).expect("Could not get hwp.");
+
+                hwp.set_channels(num_channels).expect("Could not set channel number.");
+                hwp.set_rate(rate, ValueOr::Nearest).expect("Could not set sample rate.");
+                hwp.set_format(Format::s16()).expect("Could not set sample format.");
+                hwp.set_access(Access::RWInterleaved).expect("Could not set access.");
+                sink.pcm.hw_params(&hwp).expect("Could not attach hwp to PCM.");
+            }
+
+            match sink.pcm.start(){
+                Ok(()) => (),
+                Err(errno) => {
+                    println!("Error: {errno}");
+                    sink.pcm.drain().expect("Drain failed");
+                    sink.pcm.recover(errno.errno(), false);
+                },
+            }
+
+            // Debug
+            // let ff = pcm.hw_params_current().and_then(|h| h.get_format())?;
+
+            {
+                let params = sink.pcm.hw_params_current().unwrap();
+                let sr = params.get_rate().unwrap();
+                let nch = params.get_channels().unwrap();
+                let fmt = params.get_format().unwrap();
+                let bsize = params.get_buffer_size().unwrap();
+                let psize = params.get_period_size().unwrap();
+                
+                println!("Created playback device with sr={sr}, channels={nch}, format={fmt}, period size={psize} and buffer size={bsize}.\n");
+            }
+
+            {
+                let swp = sink.pcm.sw_params_current().unwrap();
+                match swp.set_start_threshold(512) {
+                    Ok(()) => (),
+                    Err(errno) => println!("Could not set start_threshold sw parameter (error {errno})."),
+                }
+                let thr = swp.get_start_threshold().unwrap();
+                println!("Start threshold is {thr}.");
+            }
+            Some(sink)
+        }
+
+        pub fn write(&self, buf : &[i16], size : usize){
+            let io = self.pcm.io_i16().unwrap();
+
+            match io.writei(buf){
+                Err(errno) => {
+                    // Maybe try to investigate the pcm device here and try to reopen it (because broken pipe)
+
+                    println!("Write did not work. Error: {errno}");
+                    let state = self.pcm.state();
+                    println!("State: {:?}", state);
+                    match self.pcm.recover(errno.errno(), false){
+                        Ok(()) => {
+                            println!("Was able to recover from error");
+                            match io.writei(buf){
+                                Ok(_) => (),
+                                Err(errno) => println!("Second attempt to write buffer failed ({errno})."),
+                            }
+                        },
+                        Err(errno2) => println!("Could not recover from error (errno2={errno2}"),
+                    }
+                },
+                Ok(size) => (),
+            }
+
+        }
+    
+    }
+
+}
