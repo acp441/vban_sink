@@ -1,19 +1,19 @@
 use std::{net::IpAddr, path::PathBuf};
+use vban_sink::vban;
 
 /**
  * Notes:
  * ALSA buffer may be tweaked via hardware and software parameters, namely pcm.sw_params_current() or pcm.hw_params_current(). The swp.set_start_threshold(x) may be used to determine the amount of frames that have to be available in order for playback to start. 
  * 
  * ToDo: 
- * - Support multiple sammple rates
+ * - Support multiple sample rates
  * - Support multiple sample formats
  * - Check and discriminate stream names
  * - Support config files (if necessary)
  */
 
 
-use vban_sink::vban::{self, AlsaSink, VBanSampleRates};
-use clap::{builder::Str, Parser};
+use clap::Parser;
 
 #[derive(Parser)]
 struct Cli {
@@ -30,7 +30,6 @@ struct Cli {
     /// Specify a stream name if you want the application to discriminate incoming streams
     #[arg(short, long, value_name = "stream")]
     stream_name : Option<String>
-    
 }
 
 // #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -68,7 +67,6 @@ fn main() -> Result<(), i32> {
 
     }
 
-    let sink = AlsaSink::init("pipewire", Some(2), Some(44100)).unwrap();
 
     let mut vbr = match vban::VbanRecipient::create(
         addr, 
@@ -87,7 +85,7 @@ fn main() -> Result<(), i32> {
 
 
     loop {
-        vbr.handle(&sink);
+        vbr.handle();
     }
 
     Ok(())

@@ -251,6 +251,8 @@ pub mod vban{
         state : PlayerState,
 
         timer : Instant,
+
+        sink : Option<AlsaSink>,
     }
 
     impl VbanRecipient {
@@ -294,6 +296,8 @@ pub mod vban{
                 state : PlayerState::Idle,
 
                 timer : Instant::now(),
+
+                sink : None,
             };
 
             result.socket.set_read_timeout(Some(Duration::new(1, 0))).expect("Could not set timeout of socket");
@@ -303,13 +307,31 @@ pub mod vban{
         }
         
 
-        pub fn handle(&mut self, sink : &impl VbanSink){
+        pub fn handle(&mut self){
             let mut buf :[u8; VBAN_PACKET_MAX_LEN_BYTES] = [0; VBAN_PACKET_MAX_LEN_BYTES];
             let packet = self.socket.recv_from(&mut buf);
             // let buf = Vec::from(buf);
 
             if self.state == PlayerState::Playing && self.timer.elapsed().as_secs() > 2 {
                 self.state = PlayerState::Idle;
+               
+
+                match &self.sink{
+                    None => println!("Something's wrong. Expected to find a pcm but it is unitialized."),
+                    Some(sink) => {
+                        let sink = self.sink.as_mut().unwrap();
+                        match sink.pcm.drain(){
+                            Err(errno) => println!("Error while draining pcm: {errno}"),
+                            Ok(()) => (),
+                        }
+                        match sink.pcm.drop(){
+                            Err(errno) => println!("Error while closing pcm: {errno}"),
+                            Ok(()) => println!("(Debug) Success closing the pcm"),
+                        }
+                        self.sink = None;
+                    }
+                }
+                
                 println!("idle");
             }
             let size = match packet {
@@ -345,6 +367,7 @@ pub mod vban{
                 }
                 if protocol != VBanProtocol::VbanProtocolAudio {
                     println!("Discarding packet with protocol {:?} because it is not supported.", protocol);
+                    return;
                 }
 
 
@@ -387,13 +410,20 @@ pub mod vban{
                 //     sink.write(&[0i16; 44100], 44100);
                 //     self.state = PlayerState::Playing;
                 // }
-                sink.write(&to_sink, size/2);
+
                 self.timer = Instant::now();
                 if self.state == PlayerState::Idle {
+                    match &self.sink {
+                        Some(_sink) => println!("Something's wrong. Sink is Some() although it should be None"),
+                        None => {
+                            self.sink = Some(AlsaSink::init("pipewire", Some(2), Some(44100)).unwrap());
+                        }
+                    }
                     self.state = PlayerState::Playing;
-                    println!("playing\n");
                 }
-                // println!("\x1B[1ALeft {:.4}, Right {:.4} (from {num_samples} samples)", (left as f32 / i16::MAX as f32), (right as f32 / i16::MAX as f32));
+                let sink = self.sink.as_mut().unwrap();
+                sink.write(&to_sink);
+                println!("\x1B[1ALeft {:.4}, Right {:.4} (from {num_samples} samples)", (left as f32 / i16::MAX as f32), (right as f32 / i16::MAX as f32));
             } else{
                 println!("Packet is not VBAN");
             }
@@ -422,7 +452,7 @@ pub mod vban{
 
 
     pub trait VbanSink {
-        fn write(&self, buf : &[i16], size : usize);
+        fn write(&self, buf : &[i16]);
     }
 
     // ALSA SINK
@@ -492,7 +522,9 @@ pub mod vban{
                     Ok(()) => (),
                     Err(errno) => println!("Could not set start_threshold sw parameter (error {errno})."),
                 }
+
                 let thr = swp.get_start_threshold().unwrap();
+                // todo? set silence threshold?
                 println!("Start threshold is {thr}.");
             }
             Some(sink)
@@ -502,7 +534,7 @@ pub mod vban{
 
     impl VbanSink for AlsaSink {
 
-        fn write(&self, buf : &[i16], size : usize){
+        fn write(&self, buf : &[i16]){
             let io = self.pcm.io_i16().unwrap();
 
             match io.writei(buf){
@@ -510,8 +542,8 @@ pub mod vban{
                     // Maybe try to investigate the pcm device here and try to reopen it (because broken pipe)
 
                     println!("Write did not work. Error: {errno}");
-                    let state = self.pcm.state();
-                    println!("State: {:?}", state);
+                    // let state = self.pcm.state();
+
                     match self.pcm.recover(errno.errno(), false){
                         Ok(()) => {
                             println!("Was able to recover from error");
@@ -523,7 +555,7 @@ pub mod vban{
                         Err(errno2) => println!("Could not recover from error (errno2={errno2}"),
                     }
                 },
-                Ok(size) => (),
+                Ok(_size) => (),
             }
 
         }
