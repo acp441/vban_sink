@@ -1,7 +1,7 @@
 
 pub mod vban{
     use core::panic;
-    use std::{net::{IpAddr, UdpSocket}, usize};
+    use std::{net::{IpAddr, UdpSocket}, time::{self, Duration, Instant}, usize};
     use alsa::{pcm::*, ValueOr};
     use alsa::Direction;
     use byteorder::{ByteOrder, LittleEndian};
@@ -120,6 +120,7 @@ pub mod vban{
 
     const VBAN_PROTOCOL_MASK : u8 = 0xE0;
 
+    #[derive(Debug, PartialEq)]
     enum VBanProtocol {
         VbanProtocolAudio         =   0x00,
         VbanProtocolSerial        =   0x20,
@@ -130,7 +131,23 @@ pub mod vban{
         VbanProtocolUndefined4   =   0xE0
     }
 
-    const VBAN_BIT_RESOLUTION_MASK : u32 = 0x07;
+    impl From<u8> for VBanProtocol {
+
+        fn from(value: u8) -> Self {
+            match value & VBAN_PROTOCOL_MASK {
+                0x00 => VBanProtocol::VbanProtocolAudio,
+                0x20 => VBanProtocol::VbanProtocolSerial,
+                0x40 => VBanProtocol::VbanProtocolTxt,
+                0x80 => VBanProtocol::VbanProtocolUndefined1,
+                0xA0 => VBanProtocol::VbanProtocolUndefined2,
+                0xC0 => VBanProtocol::VbanProtocolUndefined3,
+                0xE0 => VBanProtocol::VbanProtocolUndefined4,
+                _ => panic!("Invalid value for enum VBanProtocol ({})", value),
+            }
+        }
+    }
+
+    const VBAN_BIT_RESOLUTION_MASK : u8 = 0x07;
 
     #[derive(Clone, Copy, Debug)]
     enum VBanBitResolution {
@@ -147,7 +164,7 @@ pub mod vban{
 
     impl From<u8> for VBanBitResolution {
         fn from(item : u8) -> Self {
-            match  item  {
+            match  item & VBAN_BIT_RESOLUTION_MASK  {
                 0 => VBanBitResolution::VbanBitfmt8Int,
                 1 => VBanBitResolution::VbanBitfmt16Int,
                 2 => VBanBitResolution::VbanBitfmt24Int,
@@ -157,7 +174,7 @@ pub mod vban{
                 6 => VBanBitResolution::VbanBitfmt12Int,
                 7 => VBanBitResolution::VbanBitfmt10Int,
                 8 => VBanBitResolution::VbanBitResolutionMax,
-                _ => VBanBitResolution::VbanBitResolutionMax,        // should be invalid tho
+                _ => panic!("Invalid value for enum VBanBitResolution ({item})"),
             }
         }
     }
@@ -167,6 +184,7 @@ pub mod vban{
     const VBAN_RESERVED_MASK : u8 = 0x08;
     const VBAN_CODEC_MASK : u8 = 0xF0;
 
+    #[derive(Debug, PartialEq)]
     enum VBanCodec {
         VbanCodecPcm              =   0x00,
         VbanCodecVbca             =   0x10,
@@ -184,6 +202,30 @@ pub mod vban{
         VbanCodecUndefined13     =   0xD0,
         VbanCodecUndefined14     =   0xE0,
         VbanCodecUser             =   0xF0
+    }
+
+    impl From<u8> for VBanCodec {
+        fn from(value: u8) -> Self {
+            match value & VBAN_CODEC_MASK {
+                0x00 => VBanCodec::VbanCodecPcm,
+                0x10 => VBanCodec::VbanCodecVbca,
+                0x20 => VBanCodec::VbanCodecVbcv,
+                0x30 => VBanCodec::VbanCodecUndefined3,
+                0x40 => VBanCodec::VbanCodecUndefined4,
+                0x50 => VBanCodec::VbanCodecUndefined5,
+                0x60 => VBanCodec::VbanCodecUndefined6,
+                0x70 => VBanCodec::VbanCodecUndefined7,
+                0x80 => VBanCodec::VbanCodecUndefined8,
+                0x90 => VBanCodec::VbanCodecUndefined9,
+                0xA0 => VBanCodec::VbanCodecUndefined10,
+                0xB0 => VBanCodec::VbanCodecUndefined11,
+                0xC0 => VBanCodec::VbanCodecUndefined12,
+                0xD0 => VBanCodec::VbanCodecUndefined13,
+                0xE0 => VBanCodec::VbanCodecUndefined14,
+                0xF0 => VBanCodec::VbanCodecUser,
+                _ => VBanCodec::VbanCodecUser
+            }
+        }
     }
 
     #[derive (PartialEq)]
@@ -207,6 +249,8 @@ pub mod vban{
         nu_frame : u32,
 
         state : PlayerState,
+
+        timer : Instant,
     }
 
     impl VbanRecipient {
@@ -214,7 +258,7 @@ pub mod vban{
         pub fn create(ip_addr : IpAddr, port: u16, stream_name : String, numch : Option<u8>, sample_rate : Option<VBanSampleRates>) -> Option<Self> {
 
             if stream_name.len() > VBAN_STREAM_NAME_SIZE {
-                dbg!("Stream name is too long!");
+                dbg!("Stream name exceeds the limit of {} characters", VBAN_STREAM_NAME_SIZE);
                 return None;
             }
 
@@ -228,7 +272,7 @@ pub mod vban{
             }
             
             let to_addr = (ip_addr, port);
-            Some (Self {
+            let result  = VbanRecipient{
                 socket :  match UdpSocket::bind(to_addr){
                     Ok(sock) => sock,
                     Err(_) => {
@@ -244,26 +288,35 @@ pub mod vban{
                 sample_format : None,
                 
                 stream_name : _sn,
-                
+
                 nu_frame : 0,
                 
                 state : PlayerState::Idle,
-            })
+
+                timer : Instant::now(),
+            };
+
+            result.socket.set_read_timeout(Some(Duration::new(1, 0))).expect("Could not set timeout of socket");
+
+            println!("VBAN recepipient ready. Waiting for incoming audio packets...");
+            Some(result)
         }
         
 
-        pub fn handle(&mut self, sink : &AlsaSink){
+        pub fn handle(&mut self, sink : &impl VbanSink){
             let mut buf :[u8; VBAN_PACKET_MAX_LEN_BYTES] = [0; VBAN_PACKET_MAX_LEN_BYTES];
             let packet = self.socket.recv_from(&mut buf);
-            let buf = Vec::from(buf);
+            // let buf = Vec::from(buf);
 
+            if self.state == PlayerState::Playing && self.timer.elapsed().as_secs() > 2 {
+                self.state = PlayerState::Idle;
+                println!("idle");
+            }
             let size = match packet {
-                Ok((size, addr)) => {
-                    // println!("Got message of size {size} from {addr}.");
-                    // println!("data: {buf:?}");
+                Ok((size, _addr)) => {
                     size
                 },
-                _ => 0,
+                _ => return,
             };
 
             if buf[..4] == *b"VBAN" {
@@ -276,6 +329,24 @@ pub mod vban{
                 self.sample_format = Some(head.sample_format.into());
             
                 let num_samples = head.num_samples + 1;
+                let bits_per_sample = VBAN_BIT_RESOLUTION_SIZE[self.sample_format.unwrap() as usize];
+                let codec = VBanCodec::from(head.sample_format);
+                let protocol = VBanProtocol::from(head.sample_rate);
+
+                // println!("DEBUG: bps={bits_per_sample}, codec={:?}", codec);
+
+                if bits_per_sample != 2{
+                    println!("Bitwidth other than 16 bits not supported (found {}).", bits_per_sample * 8);
+                    return;
+                }
+                if codec != VBanCodec::VbanCodecPcm {
+                    println!("Any codecs other than PCM are not supported (found {:?}).", codec);
+                    return;
+                }
+                if protocol != VBanProtocol::VbanProtocolAudio {
+                    println!("Discarding packet with protocol {:?} because it is not supported.", protocol);
+                }
+
 
                 // println!("Extracted info from the packet:
 // num_channels={}
@@ -286,11 +357,11 @@ pub mod vban{
                 // println!("Stream name: {:?}", std::str::from_utf8(&self.stream_name).unwrap());
 
                 let audio_data : Vec<u8> = Vec::from(&buf[VBAN_PACKET_HEADER_BYTES + VBAN_PACKET_COUNTER_BYTES..size]);
-                let mut to_sink = vec![0; audio_data.len() / 2];
+                let mut to_sink = vec![0; audio_data.len() / bits_per_sample as usize];
 
                 let mut left : i16 = 0;
                 let mut right : i16 = 0;
-                for (idx, smp) in audio_data.iter().enumerate() {
+                for (idx, _smp) in audio_data.iter().enumerate() {
                     if idx % 2 == 1 {
                         continue;
                     }
@@ -309,7 +380,6 @@ pub mod vban{
 
                     to_sink[idx / 2] = amplitude_le;
                 }
-                println!("\x1B[1ALeft {:.4}, Right {:.4} (from {num_samples} samples)", (left as f32 / i16::MAX as f32), (right as f32 / i16::MAX as f32));
 
                 // if self.state == PlayerState::Idle {
                 //     /* Push silence before the data */
@@ -318,6 +388,12 @@ pub mod vban{
                 //     self.state = PlayerState::Playing;
                 // }
                 sink.write(&to_sink, size/2);
+                self.timer = Instant::now();
+                if self.state == PlayerState::Idle {
+                    self.state = PlayerState::Playing;
+                    println!("playing\n");
+                }
+                // println!("\x1B[1ALeft {:.4}, Right {:.4} (from {num_samples} samples)", (left as f32 / i16::MAX as f32), (right as f32 / i16::MAX as f32));
             } else{
                 println!("Packet is not VBAN");
             }
@@ -344,6 +420,10 @@ pub mod vban{
 
     }
 
+
+    pub trait VbanSink {
+        fn write(&self, buf : &[i16], size : usize);
+    }
 
     // ALSA SINK
 
@@ -385,7 +465,10 @@ pub mod vban{
                 Err(errno) => {
                     println!("Error: {errno}");
                     sink.pcm.drain().expect("Drain failed");
-                    sink.pcm.recover(errno.errno(), false);
+                    match sink.pcm.recover(errno.errno(), false){
+                        Ok(()) => (),
+                        Err(errno) => println!("Recovering after failed start failed too."),
+                    }
                 },
             }
 
@@ -414,8 +497,12 @@ pub mod vban{
             }
             Some(sink)
         }
+    
+    }
 
-        pub fn write(&self, buf : &[i16], size : usize){
+    impl VbanSink for AlsaSink {
+
+        fn write(&self, buf : &[i16], size : usize){
             let io = self.pcm.io_i16().unwrap();
 
             match io.writei(buf){
@@ -440,7 +527,6 @@ pub mod vban{
             }
 
         }
-    
     }
 
 }

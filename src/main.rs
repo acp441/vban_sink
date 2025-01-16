@@ -1,18 +1,79 @@
+use std::{net::IpAddr, path::PathBuf};
+
 /**
  * Notes:
  * ALSA buffer may be tweaked via hardware and software parameters, namely pcm.sw_params_current() or pcm.hw_params_current(). The swp.set_start_threshold(x) may be used to determine the amount of frames that have to be available in order for playback to start. 
+ * 
+ * ToDo: 
+ * - Support multiple sammple rates
+ * - Support multiple sample formats
+ * - Check and discriminate stream names
+ * - Support config files (if necessary)
  */
 
 
-use vban_sink::vban::{self, AlsaSink};
+use vban_sink::vban::{self, AlsaSink, VBanSampleRates};
+use clap::{builder::Str, Parser};
+
+#[derive(Parser)]
+struct Cli {
+    /// Specify an IP-address if you don't want to bind to all interfaces
+    addr : Option<IpAddr>,
+
+    /// Specify a different port if you don't want to use port 6980
+    port : Option<u16>,
+
+    /// Use a config file
+    #[arg(short, long, value_name = "file")]
+    config: Option<PathBuf>,
+
+    /// Specify a stream name if you want the application to discriminate incoming streams
+    #[arg(short, long, value_name = "stream")]
+    stream_name : Option<String>
+    
+}
 
 // #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn main() -> Result<(), i32> {
 
+    let cli = Cli::parse();
+
+    let use_config = match cli.config {
+        None => false,
+        Some(_) => panic!("Config files are currently not supported."),
+    };
+
+    let addr : IpAddr;
+    let port : u16;
+    let stream_name : String;
+
+    if use_config {
+        // todo! 
+        addr = "127.0.0.1".parse().unwrap();
+        port = todo!();
+        stream_name = String::from("");
+    } else {
+        addr = match cli.addr {
+            None => "0.0.0.0".parse().unwrap(),
+            Some(addr) => addr,
+        };
+        port = match cli.port {
+            None => 6980,
+            Some(num) => num,
+        };
+        stream_name = match cli.stream_name {
+            None => String::from(""),
+            Some(name) => name,
+        };
+
+    }
+
+    let sink = AlsaSink::init("pipewire", Some(2), Some(44100)).unwrap();
+
     let mut vbr = match vban::VbanRecipient::create(
-        "127.0.0.1".parse().unwrap(), 
-        6980, 
-        String::from("esp32"), 
+        addr, 
+        port, 
+        stream_name, 
         Some(2),
         None){
             None => {
@@ -23,8 +84,6 @@ fn main() -> Result<(), i32> {
                 _vbr
             }
     };
-
-    let sink = AlsaSink::init("pipewire", Some(2), Some(44100)).unwrap();
 
 
     loop {

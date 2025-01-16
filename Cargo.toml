@@ -10,3 +10,4 @@ byteorder = "1"
 
 # This dependency is only used on Linux
 alsa = "0.9.1"
+clap = { version = "4.5.26", features = ["derive"] }
