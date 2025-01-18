@@ -1,7 +1,7 @@
 
 pub mod vban{
     use core::panic;
-    use std::{net::{IpAddr, UdpSocket}, time::{self, Duration, Instant}, usize};
+    use std::{net::{IpAddr, UdpSocket}, str::from_utf8, time::{ Duration, Instant}, usize};
     use alsa::{pcm::*, ValueOr};
     use alsa::Direction;
     use byteorder::{ByteOrder, LittleEndian};
@@ -63,7 +63,7 @@ pub mod vban{
         11025, 22050, 44100, 88200, 176400, 352800, 705600
     ];
 
-    #[derive(Copy, Clone, Debug)]
+    #[derive(Copy, Clone, Debug, PartialEq)]
     pub enum VBanSampleRates {
         SampleRate6000Hz,
         SampleRate12000Hz,
@@ -88,10 +88,38 @@ pub mod vban{
         SampleRate705600Hz
     }
 
+    impl std::fmt::Display for VBanSampleRates {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                VBanSampleRates::SampleRate6000Hz => write!(f, "{} Hz", 6000), 
+                VBanSampleRates::SampleRate12000Hz => write!(f, "{} Hz", 12000), 
+                VBanSampleRates::SampleRate24000Hz => write!(f, "{} Hz", 24000), 
+                VBanSampleRates::SampleRate48000Hz => write!(f, "{} Hz", 48000), 
+                VBanSampleRates::SampleRate96000Hz => write!(f, "{} Hz", 96000), 
+                VBanSampleRates::SampleRate192000Hz => write!(f, "{} Hz", 192000), 
+                VBanSampleRates::SampleRate384000Hz => write!(f, "{} Hz", 384000), 
+                VBanSampleRates::SampleRate8000Hz => write!(f, "{} Hz", 8000), 
+                VBanSampleRates::SampleRate16000Hz => write!(f, "{} Hz", 16000), 
+                VBanSampleRates::SampleRate32000Hz => write!(f, "{} Hz", 32000), 
+                VBanSampleRates::SampleRate64000Hz => write!(f, "{} Hz", 64000), 
+                VBanSampleRates::SampleRate128000Hz => write!(f, "{} Hz", 128000), 
+                VBanSampleRates::SampleRate256000Hz => write!(f, "{} Hz", 256000), 
+                VBanSampleRates::SampleRate512000Hz => write!(f, "{} Hz", 512000), 
+                VBanSampleRates::SampleRate11025Hz => write!(f, "{} Hz", 11025), 
+                VBanSampleRates::SampleRate22050Hz => write!(f, "{} Hz", 22050), 
+                VBanSampleRates::SampleRate44100Hz => write!(f, "{} Hz", 44100), 
+                VBanSampleRates::SampleRate88200Hz => write!(f, "{} Hz", 88200), 
+                VBanSampleRates::SampleRate176400Hz => write!(f, "{} Hz", 176400), 
+                VBanSampleRates::SampleRate352800Hz => write!(f, "{} Hz", 352800), 
+                VBanSampleRates::SampleRate705600Hz => write!(f, "{} Hz", 705600),             
+            }
+        }
+    }
+
     impl From<u8> for VBanSampleRates {
 
         fn from(item : u8) -> Self{
-            match item {
+            match item & VBAN_SR_MASK {
                 0 => VBanSampleRates::SampleRate6000Hz,
                 1 => VBanSampleRates::SampleRate12000Hz,
                 2 => VBanSampleRates::SampleRate24000Hz,
@@ -125,6 +153,7 @@ pub mod vban{
         VbanProtocolAudio         =   0x00,
         VbanProtocolSerial        =   0x20,
         VbanProtocolTxt           =   0x40,
+        VbanProtocolService      =   0x60,
         VbanProtocolUndefined1   =   0x80,
         VbanProtocolUndefined2   =   0xA0,
         VbanProtocolUndefined3   =   0xC0,
@@ -138,11 +167,12 @@ pub mod vban{
                 0x00 => VBanProtocol::VbanProtocolAudio,
                 0x20 => VBanProtocol::VbanProtocolSerial,
                 0x40 => VBanProtocol::VbanProtocolTxt,
+                0x60 => VBanProtocol::VbanProtocolService,
                 0x80 => VBanProtocol::VbanProtocolUndefined1,
                 0xA0 => VBanProtocol::VbanProtocolUndefined2,
                 0xC0 => VBanProtocol::VbanProtocolUndefined3,
                 0xE0 => VBanProtocol::VbanProtocolUndefined4,
-                _ => panic!("Invalid value for enum VBanProtocol ({})", value),
+                _ => panic!("Invalid value for enum VBanProtocol ({:x})", value & VBAN_PROTOCOL_MASK),
             }
         }
     }
@@ -244,7 +274,7 @@ pub mod vban{
 
         sample_format : Option<VBanBitResolution>,
 
-        stream_name : [u8;16],
+        stream_name : Option<[u8;16]>,
 
         nu_frame : u32,
 
@@ -253,32 +283,40 @@ pub mod vban{
         timer : Instant,
 
         sink : Option<AlsaSink>,
+
+        sink_name : String,
+
+        silence : u32,
     }
 
     impl VbanRecipient {
 
-        pub fn create(ip_addr : IpAddr, port: u16, stream_name : String, numch : Option<u8>, sample_rate : Option<VBanSampleRates>) -> Option<Self> {
+        pub fn create(ip_addr : IpAddr, port: u16, stream_name : Option<String>, numch : Option<u8>, sample_rate : Option<VBanSampleRates>, sink_name : String, silence : Option<u32>) -> Option<Self> {
 
-            if stream_name.len() > VBAN_STREAM_NAME_SIZE {
-                dbg!("Stream name exceeds the limit of {} characters", VBAN_STREAM_NAME_SIZE);
-                return None;
-            }
-
-            let mut _sn: [u8; 16] = [0;16];
-
-            for (idx, b) in stream_name.bytes().enumerate(){
-                if idx >= VBAN_STREAM_NAME_SIZE {
-                    break;
+            let mut _sn: Option<[u8; 16]> = match stream_name {
+                None => None,
+                Some(name) => {
+                    if name.len() > VBAN_STREAM_NAME_SIZE {
+                        dbg!("Stream name exceeds the limit of {} characters", VBAN_STREAM_NAME_SIZE);
+                        return None;
+                    }
+                    let mut _sn: [u8; 16] = [0u8; 16];
+                    for (idx, b) in name.bytes().enumerate(){
+                        if idx >= VBAN_STREAM_NAME_SIZE {
+                            break;
+                        }
+                        _sn[idx] = b;
+                    }
+                    Some(_sn)
                 }
-                _sn[idx] = b;
-            }
+            };
             
             let to_addr = (ip_addr, port);
             let result  = VbanRecipient{
                 socket :  match UdpSocket::bind(to_addr){
                     Ok(sock) => sock,
                     Err(_) => {
-                        dbg!("Could not bind socket");
+                        dbg!("Could not create socket");
                         return None;
                     },
                 },
@@ -298,6 +336,13 @@ pub mod vban{
                 timer : Instant::now(),
 
                 sink : None,
+
+                sink_name,
+
+                silence : match silence {
+                    None => 0,
+                    Some(val) => val,
+                }
             };
 
             result.socket.set_read_timeout(Some(Duration::new(1, 0))).expect("Could not set timeout of socket");
@@ -315,25 +360,23 @@ pub mod vban{
             if self.state == PlayerState::Playing && self.timer.elapsed().as_secs() > 2 {
                 self.state = PlayerState::Idle;
                
-
                 match &self.sink{
                     None => println!("Something's wrong. Expected to find a pcm but it is unitialized."),
                     Some(sink) => {
-                        let sink = self.sink.as_mut().unwrap();
                         match sink.pcm.drain(){
                             Err(errno) => println!("Error while draining pcm: {errno}"),
                             Ok(()) => (),
                         }
                         match sink.pcm.drop(){
                             Err(errno) => println!("Error while closing pcm: {errno}"),
-                            Ok(()) => println!("(Debug) Success closing the pcm"),
+                            Ok(()) => (),
                         }
                         self.sink = None;
                     }
                 }
-                
                 println!("idle");
             }
+
             let size = match packet {
                 Ok((size, _addr)) => {
                     size
@@ -346,38 +389,41 @@ pub mod vban{
                 let head : [u8; 28] = buf[0..28].try_into().unwrap();
                 let head = VBanHeader::from(head);
 
-                self.num_channels = Some(head.num_channels + 1);
-                self.sample_rate = Some(head.sample_rate.into());
                 self.sample_format = Some(head.sample_format.into());
-            
+                
                 let num_samples = head.num_samples + 1;
                 let bits_per_sample = VBAN_BIT_RESOLUTION_SIZE[self.sample_format.unwrap() as usize];
                 let codec = VBanCodec::from(head.sample_format);
                 let protocol = VBanProtocol::from(head.sample_rate);
-
+                let name_incoming : &str = from_utf8(&head.stream_name).unwrap();
+                
                 // println!("DEBUG: bps={bits_per_sample}, codec={:?}", codec);
-
-                if bits_per_sample != 2{
-                    println!("Bitwidth other than 16 bits not supported (found {}).", bits_per_sample * 8);
+                
+                if protocol != VBanProtocol::VbanProtocolAudio {
+                    println!("Discarding packet with protocol {:?} because it is not supported.", protocol);
                     return;
                 }
                 if codec != VBanCodec::VbanCodecPcm {
                     println!("Any codecs other than PCM are not supported (found {:?}).", codec);
                     return;
                 }
-                if protocol != VBanProtocol::VbanProtocolAudio {
-                    println!("Discarding packet with protocol {:?} because it is not supported.", protocol);
+                if bits_per_sample != 2{
+                    println!("Bitwidth other than 16 bits not supported (found {}).", bits_per_sample * 8);
                     return;
                 }
+                
+                let sr : VBanSampleRates  = head.sample_rate.into();
+                self.num_channels = Some(head.num_channels + 1);
 
-
-                // println!("Extracted info from the packet:
-// num_channels={}
-// sample_rate={:?}
-// bps={:?}
-// num_samples={}", 
-                //             self.num_channels.unwrap(), self.sample_rate.unwrap(), self.sample_format.unwrap(), num_samples);
-                // println!("Stream name: {:?}", std::str::from_utf8(&self.stream_name).unwrap());
+                match self.stream_name {
+                    None => (),
+                    Some(name) => {
+                        if from_utf8(&name).unwrap() != name_incoming {
+                            println!("Discarding packet because stream names don't match.");
+                            return;
+                        }
+                    }
+                }
 
                 let audio_data : Vec<u8> = Vec::from(&buf[VBAN_PACKET_HEADER_BYTES + VBAN_PACKET_COUNTER_BYTES..size]);
                 let mut to_sink = vec![0; audio_data.len() / bits_per_sample as usize];
@@ -404,22 +450,32 @@ pub mod vban{
                     to_sink[idx / 2] = amplitude_le;
                 }
 
-                // if self.state == PlayerState::Idle {
-                //     /* Push silence before the data */
-                //     println!("Silence!");
-                //     sink.write(&[0i16; 44100], 44100);
-                //     self.state = PlayerState::Playing;
-                // }
 
                 self.timer = Instant::now();
                 if self.state == PlayerState::Idle {
                     match &self.sink {
                         Some(_sink) => println!("Something's wrong. Sink is Some() although it should be None"),
                         None => {
-                            self.sink = Some(AlsaSink::init("pipewire", Some(2), Some(44100)).unwrap());
+                            self.sample_rate = Some(sr);
+                            self.sink = Some(AlsaSink::init(&self.sink_name, Some(self.num_channels() as u32), Some(self.sample_rate())).expect("Could not create audio device with the required specs."));
+
+                            println!("Connected to stream {}: \nSR: {} \t Ch: {} \t BPS: {}\n", name_incoming, self.sample_rate(), self.num_channels(), self.bits_per_sample());
+
+                            /* Push silence before the data */
+                            let one_ms_smp = self.sample_rate() / 1000;
+                            let silence_buf = vec![0i16; (self.sample_rate() / 1000 * self.silence) as usize];
+                            self.sink.as_mut().unwrap().write(&silence_buf);
                         }
                     }
                     self.state = PlayerState::Playing;
+                } else {
+                    if sr != self.sample_rate.unwrap(){
+                        println!("SR: {} -> {}", self.sample_rate.unwrap(), sr);
+                        self.sample_rate = Some(sr);
+                        let sink = self.sink.as_mut().unwrap();
+                        sink.pcm.drain();
+                        self.sink = Some(AlsaSink::init(&self.sink_name, Some(self.num_channels() as u32), Some(self.sample_rate())).expect("Could not create audio device with the required specs."));
+                    }
                 }
                 let sink = self.sink.as_mut().unwrap();
                 sink.write(&to_sink);
@@ -431,20 +487,27 @@ pub mod vban{
 
 
         // GETTER
-        fn name(self) -> [u8;16]{
+        fn name(&self) -> Option<[u8;16]>{
             self.stream_name
         }
+ 
+        fn name_str(&self) -> String{
+            match &self.stream_name {
+                None => String::from(""),
+                Some(name) => String::from(from_utf8(name).unwrap())
+            }
+        }
 
-        fn sample_rate(self) -> u32 {
+        fn sample_rate(&self) -> u32 {
             VBAN_SRLIST[self.sample_rate.unwrap() as usize]
         }
 
-        fn bits_per_sample(self) -> u8 {
-            self.sample_format.unwrap() as u8
+        fn bits_per_sample(&self) -> u8 {
+            self.sample_format.unwrap() as u8 + 1
         }
 
-        fn num_channels(self) -> u8 {
-            (self.num_channels.unwrap() + 1) as u8
+        fn num_channels(&self) -> u8 {
+            self.num_channels.unwrap() as u8
         }
 
 
@@ -495,7 +558,7 @@ pub mod vban{
                 Err(errno) => {
                     println!("Error: {errno}");
                     sink.pcm.drain().expect("Drain failed");
-                    match sink.pcm.recover(errno.errno(), false){
+                    match sink.pcm.recover(errno.errno(), true){
                         Ok(()) => (),
                         Err(errno) => println!("Recovering after failed start failed too."),
                     }
@@ -505,16 +568,17 @@ pub mod vban{
             // Debug
             // let ff = pcm.hw_params_current().and_then(|h| h.get_format())?;
 
-            {
-                let params = sink.pcm.hw_params_current().unwrap();
-                let sr = params.get_rate().unwrap();
-                let nch = params.get_channels().unwrap();
-                let fmt = params.get_format().unwrap();
-                let bsize = params.get_buffer_size().unwrap();
-                let psize = params.get_period_size().unwrap();
+            // {
+            //     let params = sink.pcm.hw_params_current().unwrap();
+            //     println!("(Debug) HwParams: {:?}", params);
+            //     let sr = params.get_rate().unwrap();
+            //     let nch = params.get_channels().unwrap();
+            //     let fmt = params.get_format().unwrap();
+            //     let bsize = params.get_buffer_size().unwrap();
+            //     let psize = params.get_period_size().unwrap();
                 
-                println!("Created playback device with sr={sr}, channels={nch}, format={fmt}, period size={psize} and buffer size={bsize}.\n");
-            }
+            //     println!("Created playback device with sr={sr}, channels={nch}, format={fmt}, period size={psize} and buffer size={bsize}.\n");
+            // }
 
             {
                 let swp = sink.pcm.sw_params_current().unwrap();
@@ -544,7 +608,7 @@ pub mod vban{
                     println!("Write did not work. Error: {errno}");
                     // let state = self.pcm.state();
 
-                    match self.pcm.recover(errno.errno(), false){
+                    match self.pcm.recover(errno.errno(), true){
                         Ok(()) => {
                             println!("Was able to recover from error");
                             match io.writei(buf){

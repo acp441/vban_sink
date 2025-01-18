@@ -1,5 +1,6 @@
 use std::{net::IpAddr, path::PathBuf};
 use vban_sink::vban;
+use clap::Parser;
 
 /**
  * Notes:
@@ -13,7 +14,6 @@ use vban_sink::vban;
  */
 
 
-use clap::Parser;
 
 #[derive(Parser)]
 struct Cli {
@@ -21,6 +21,7 @@ struct Cli {
     addr : Option<IpAddr>,
 
     /// Specify a different port if you don't want to use port 6980
+    #[arg(short, long)]
     port : Option<u16>,
 
     /// Use a config file
@@ -28,8 +29,12 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Specify a stream name if you want the application to discriminate incoming streams
-    #[arg(short, long, value_name = "stream")]
-    stream_name : Option<String>
+    #[arg(short, long, value_name = "name")]
+    stream_name : Option<String>,
+
+    /// Prepend silence when starting playback. Supply duration in milliseconds.
+    #[arg(short='x', long, value_name = "duration")]
+    silence : Option<u32>,
 }
 
 // #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -44,43 +49,49 @@ fn main() -> Result<(), i32> {
 
     let addr : IpAddr;
     let port : u16;
-    let stream_name : String;
+    let stream_name : Option<String>;
 
     if use_config {
-        // todo! 
+        // todo 
         addr = "127.0.0.1".parse().unwrap();
-        port = todo!();
-        stream_name = String::from("");
+        port = 6980;
+        stream_name = None;
     } else {
         addr = match cli.addr {
             None => "0.0.0.0".parse().unwrap(),
-            Some(addr) => addr,
+            Some(addr) => {
+                println!("Using {addr} as address to bind to.");
+                addr
+            },
         };
         port = match cli.port {
             None => 6980,
-            Some(num) => num,
+            Some(num) => {
+                println!("Using port {num}.");
+                num
+            },
         };
         stream_name = match cli.stream_name {
-            None => String::from(""),
-            Some(name) => name,
+            None => None,
+            Some(name) => {
+                println!("Using {name} as stream name.");
+                Some(name)
+            },
         };
 
     }
 
 
     let mut vbr = match vban::VbanRecipient::create(
-        addr, 
-        port, 
-        stream_name, 
-        Some(2),
-        None){
-            None => {
-                println!("Could not create VBAN recipient.");
-                return Err(-1)
-            },
-            Some(_vbr) => {
-                _vbr
-            }
+    addr, port, stream_name, None, None,
+    String::from("pipewire"), cli.silence){
+        None => {
+            println!("Could not create VBAN recipient.");
+            return Err(-1)
+        },
+        Some(_vbr) => {
+            _vbr
+        }
     };
 
 
@@ -88,5 +99,4 @@ fn main() -> Result<(), i32> {
         vbr.handle();
     }
 
-    Ok(())
 }
