@@ -457,7 +457,13 @@ pub mod vban{
                         Some(_sink) => println!("Something's wrong. Sink is Some() although it should be None"),
                         None => {
                             self.sample_rate = Some(sr);
-                            self.sink = Some(AlsaSink::init(&self.sink_name, Some(self.num_channels() as u32), Some(self.sample_rate())).expect("Could not create audio device with the required specs."));
+                            self.sink = match AlsaSink::init(&self.sink_name, Some(self.num_channels() as u32), Some(self.sample_rate())){
+                                None => {
+                                    println!("Could not grab audio device");
+                                    return
+                                },
+                                Some(sink) => Some(sink)
+                            };
 
                             println!("Connected to stream {}: \nSR: {} \t Ch: {} \t BPS: {}\n", name_incoming, self.sample_rate(), self.num_channels(), self.bits_per_sample());
 

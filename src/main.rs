@@ -1,4 +1,5 @@
 use std::{net::IpAddr, path::PathBuf};
+use alsa::device_name;
 use vban_sink::vban;
 use clap::Parser;
 
@@ -35,6 +36,10 @@ struct Cli {
     /// Prepend silence when starting playback. Supply duration in milliseconds.
     #[arg(short='x', long, value_name = "duration")]
     silence : Option<u32>,
+
+    /// Name of the audio device that is used as a sink (default is "default")
+    #[arg(short, long)]
+    device_name : Option<String>,
 }
 
 // #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -50,7 +55,8 @@ fn main() -> Result<(), i32> {
     let addr : IpAddr;
     let port : u16;
     let stream_name : Option<String>;
-
+    let mut device_name = String::from("default");
+    
     if use_config {
         // todo 
         addr = "127.0.0.1".parse().unwrap();
@@ -78,13 +84,16 @@ fn main() -> Result<(), i32> {
                 Some(name)
             },
         };
-
+        device_name = match cli.device_name {
+            None => String::from("default"),
+            Some(name) => name,
+        };
     }
 
 
     let mut vbr = match vban::VbanRecipient::create(
     addr, port, stream_name, None, None,
-    String::from("pipewire"), cli.silence){
+    device_name, cli.silence){
         None => {
             println!("Could not create VBAN recipient.");
             return Err(-1)
