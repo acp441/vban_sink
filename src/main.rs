@@ -1,7 +1,11 @@
-use std::{net::IpAddr, path::PathBuf};
-use alsa::device_name;
+use std::{net::IpAddr, path::PathBuf, process::Command};
 use vban_sink::vban;
 use clap::Parser;
+
+
+/// VBAN sink - by Lennard Jönsson
+/// Receive VBAN UDP streams on port 6980 (default) and play them on your ALSA audio device.
+/// All credit for developing the VBAN protocol goes to vb-audio.com.
 
 /**
  * Notes:
@@ -40,6 +44,10 @@ struct Cli {
     /// Name of the audio device that is used as a sink (default is "default")
     #[arg(short, long)]
     device_name : Option<String>,
+
+    /// Specify a script file that is run when the playback state changes
+    #[arg(short='m', long, value_name = "script")]
+    command : Option<String>,
 }
 
 // #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -102,6 +110,14 @@ fn main() -> Result<(), i32> {
             _vbr
         }
     };
+
+    match cli.command {
+        None => (),
+        Some(cmd) => {
+            let handle = Command::new(cmd);
+            vbr.set_command(handle);
+        }
+    }
 
 
     loop {

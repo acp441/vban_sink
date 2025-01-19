@@ -19,4 +19,9 @@ Start a VBAN stream, for example by using the Voicemeeter application from the c
 - -s : Specify a stream name if you only want to accept one specific stream. 
 - -x : Prepend silence when starting playback. This is useful to avoid buffer underrun on instable networks.
 - -d : Audio device name to be used as sink. Default is 'default' which usually points to the default audio device when using ALSA.
+- -m : Execute a script on playback state change.
 
+
+### Executing a script on playback state change
+
+If the option `-m` is used a script may be executed on playback state change. The script will be invoked with the argmuents "playback_started" or "playback_stopped" respectiely. 

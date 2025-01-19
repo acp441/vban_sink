@@ -1,7 +1,7 @@
 
 pub mod vban{
     use core::panic;
-    use std::{net::{IpAddr, UdpSocket}, str::from_utf8, time::{ Duration, Instant}, usize};
+    use std::{net::{IpAddr, UdpSocket}, str::from_utf8, time::{ Duration, Instant}, usize, process::Command};
     use alsa::{pcm::*, ValueOr};
     use alsa::Direction;
     use byteorder::{ByteOrder, LittleEndian};
@@ -287,6 +287,8 @@ pub mod vban{
         sink_name : String,
 
         silence : u32,
+
+        command : Option<Command>,
     }
 
     impl VbanRecipient {
@@ -342,7 +344,9 @@ pub mod vban{
                 silence : match silence {
                     None => 0,
                     Some(val) => val,
-                }
+                },
+
+                command : None,
             };
 
             result.socket.set_read_timeout(Some(Duration::new(1, 0))).expect("Could not set timeout of socket");
@@ -373,6 +377,10 @@ pub mod vban{
                         }
                         self.sink = None;
                     }
+                }
+                match &mut self.command {
+                    None => (),
+                    Some(cmd) => _ = cmd.arg("playback_stopped").output(),
                 }
                 println!("idle");
             }
@@ -468,10 +476,13 @@ pub mod vban{
                             println!("Connected to stream {}: \nSR: {} \t Ch: {} \t BPS: {}\n", name_incoming, self.sample_rate(), self.num_channels(), self.bits_per_sample());
 
                             /* Push silence before the data */
-                            let one_ms_smp = self.sample_rate() / 1000;
                             let silence_buf = vec![0i16; (self.sample_rate() / 1000 * self.silence) as usize];
                             self.sink.as_mut().unwrap().write(&silence_buf);
                         }
+                    }
+                    match &mut self.command {
+                        None => (),
+                        Some(cmd) => _ = cmd.arg("playback_started").output(),
                     }
                     self.state = PlayerState::Playing;
                 } else {
@@ -491,6 +502,11 @@ pub mod vban{
             }
         }
 
+
+        // SETTER
+        pub fn set_command(&mut self, cmd : Command){
+            self.command = Some(cmd);
+        }
 
         // GETTER
         fn name(&self) -> Option<[u8;16]>{
